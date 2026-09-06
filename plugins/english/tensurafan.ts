@@ -15,7 +15,7 @@ class TensuraFanPlugin implements Plugin.PluginBase {
   name = 'TensuraFan Slime Reader';
   icon = 'https://tensurafan.github.io/icons/android-icon-192x192.png';
   site = 'https://tensurafan.github.io';
-  version = '1.0.0';
+  version = '1.0.1';
   filters = {};
 
   private async getVolumes(): Promise<Volume[]> {
