@@ -15,14 +15,25 @@ type ChapterInfo = {
   anchor: string;
 };
 
+type SeriesChapter = {
+  volume: Volume;
+  chapter: ChapterInfo;
+  localIndex: number;
+};
+
 class TensuraFanPlugin implements Plugin.PluginBase {
   id = 'tensurafan';
   name = 'TensuraFan Slime Reader';
   icon =
     'https://tensurafan.github.io/icons/android-icon-192x192.png';
   site = 'https://tensurafan.github.io';
-  version = '1.0.3';
+  version = '1.0.4';
   filters = {};
+
+  private seriesPath = '/series/tensura';
+
+  private seriesName =
+    'That Time I Got Reincarnated as a Slime [Combined]';
 
   private async getVolumes(): Promise<Volume[]> {
     const result = await fetchApi(
@@ -35,13 +46,28 @@ class TensuraFanPlugin implements Plugin.PluginBase {
       );
     }
 
-    return (await result.json()) as Volume[];
+    const volumes =
+      (await result.json()) as Volume[];
+
+    const seen = new Set<string>();
+
+    return volumes.filter(volume => {
+      if (seen.has(volume.path)) {
+        return false;
+      }
+
+      seen.add(volume.path);
+
+      return true;
+    });
   }
 
   private async loadVolume(
     path: string,
   ): Promise<CheerioAPI> {
-    const result = await fetchApi(this.site + path);
+    const result = await fetchApi(
+      this.site + path,
+    );
 
     if (!result.ok) {
       throw new Error(
@@ -49,24 +75,18 @@ class TensuraFanPlugin implements Plugin.PluginBase {
       );
     }
 
-    const $ = loadCheerio(await result.text());
+    const $ = loadCheerio(
+      await result.text(),
+    );
 
     /*
-     * TensuraFan uses JavaScript-powered clickable terms.
-     *
-     * In some environments the site's template code appears
-     * literally as text, such as:
-     *
-     * {this.app...}
-     *
-     * Every one of these terms has a data-term attribute
-     * containing the actual text that should be displayed.
-     *
-     * Replace the contents with data-term so LNReader gets
-     * the real words instead of TensuraFan's template code.
+     * TensuraFan has selectable translation terms.
+     * LNReader doesn't run the site's preference system
+     * properly, so use the clean data-term text instead.
      */
     $('[data-term]').each((_, element) => {
-      const term = $(element).attr('data-term');
+      const term =
+        $(element).attr('data-term');
 
       if (term) {
         $(element).text(term);
@@ -75,29 +95,26 @@ class TensuraFanPlugin implements Plugin.PluginBase {
       $(element).removeAttr('onclick');
     });
 
-    /*
-     * Remove JavaScript handlers. LNReader only needs the
-     * readable content.
-     */
     $('[onclick]').removeAttr('onclick');
 
-    /*
-     * Scripts aren't needed in LNReader and can contain
-     * TensuraFan's application/template code.
-     */
     $('script').remove();
 
     return $;
   }
 
-  private cleanText(text: string): string {
+  private cleanText(
+    text: string,
+  ): string {
     return text
       .replace(
         /\{[^{}]*(?:this\.app|allTermsChosen)[^{}]*\}/gi,
         '',
       )
       .replace(/\s+/g, ' ')
-      .replace(/\s+([,:;.!?])/g, '$1')
+      .replace(
+        /\s+([,:;.!?])/g,
+        '$1',
+      )
       .trim();
   }
 
@@ -107,93 +124,155 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     const chapters: ChapterInfo[] = [];
     const seen = new Set<string>();
 
-    $('a.hlink[href*="#"]').each((_, element) => {
-      const href = $(element).attr('href') || '';
-      const hashIndex = href.indexOf('#');
+    $('a.hlink[href*="#"]').each(
+      (_, element) => {
+        const href =
+          $(element).attr('href') || '';
 
-      if (hashIndex === -1) {
-        return;
-      }
+        const hashIndex =
+          href.indexOf('#');
 
-      const anchor = href
-        .slice(hashIndex + 1)
-        .trim()
-        .toLowerCase();
-
-      if (!anchor) {
-        return;
-      }
-
-      /*
-       * Manga isn't a normal text chapter.
-       * Afterword is excluded for now because the normal
-       * chapter headings end before it.
-       */
-      if (
-        anchor === 'manga' ||
-        anchor === 'afterword'
-      ) {
-        return;
-      }
-
-      if (seen.has(anchor)) {
-        return;
-      }
-
-      seen.add(anchor);
-
-      let name = this.cleanText(
-        $(element).text(),
-      );
-
-      /*
-       * Safety fallback if a live TensuraFan page still
-       * contains template garbage in its TOC.
-       *
-       * We reconstruct the title from the matching
-       * chapter headings.
-       */
-      if (
-        !name ||
-        name.includes('this.app') ||
-        name.includes('allTermsChosen') ||
-        name.includes('{') ||
-        name.includes('}')
-      ) {
-        const chapterIndex = chapters.length;
-
-        const numberHeading = $('h1.ch-number')
-          .eq(chapterIndex)
-          .text();
-
-        const nameHeading = $('h1.ch-number')
-          .eq(chapterIndex)
-          .nextAll('h1.ch-name')
-          .first()
-          .text();
-
-        const number = this.cleanText(
-          numberHeading,
-        );
-
-        const chapterName = this.cleanText(
-          nameHeading,
-        );
-
-        if (number && chapterName) {
-          name = `${number}: ${chapterName}`;
-        } else if (number) {
-          name = number;
+        if (hashIndex === -1) {
+          return;
         }
-      }
 
-      chapters.push({
-        name,
-        anchor,
-      });
-    });
+        const anchor = href
+          .slice(hashIndex + 1)
+          .trim()
+          .toLowerCase();
+
+        if (!anchor) {
+          return;
+        }
+
+        if (
+          anchor === 'manga' ||
+          anchor === 'afterword'
+        ) {
+          return;
+        }
+
+        if (seen.has(anchor)) {
+          return;
+        }
+
+        seen.add(anchor);
+
+        let name = this.cleanText(
+          $(element).text(),
+        );
+
+        /*
+         * Fallback if template garbage appears
+         * in the TOC.
+         */
+        if (
+          !name ||
+          name.includes('this.app') ||
+          name.includes(
+            'allTermsChosen',
+          ) ||
+          name.includes('{') ||
+          name.includes('}')
+        ) {
+          const chapterIndex =
+            chapters.length;
+
+          const numberHeading =
+            $('h1.ch-number')
+              .eq(chapterIndex)
+              .text();
+
+          const nameHeading =
+            $('h1.ch-number')
+              .eq(chapterIndex)
+              .nextAll('h1.ch-name')
+              .first()
+              .text();
+
+          const number =
+            this.cleanText(
+              numberHeading,
+            );
+
+          const chapterName =
+            this.cleanText(
+              nameHeading,
+            );
+
+          if (
+            number &&
+            chapterName
+          ) {
+            name =
+              `${number}: ${chapterName}`;
+          } else if (number) {
+            name = number;
+          }
+        }
+
+        chapters.push({
+          name,
+          anchor,
+        });
+      },
+    );
 
     return chapters;
+  }
+
+  private async getSeriesChapters():
+    Promise<SeriesChapter[]> {
+    const volumes =
+      await this.getVolumes();
+
+    /*
+     * Fetch every volume to build one continuous
+     * chapter list for the combined entry.
+     */
+    const loaded =
+      await Promise.all(
+        volumes.map(async volume => {
+          const $ =
+            await this.loadVolume(
+              volume.path,
+            );
+
+          const chapters =
+            this.getChapters($);
+
+          return {
+            volume,
+            chapters,
+          };
+        }),
+      );
+
+    const result: SeriesChapter[] = [];
+
+    for (const item of loaded) {
+      item.chapters.forEach(
+        (chapter, localIndex) => {
+          result.push({
+            volume: item.volume,
+            chapter,
+            localIndex,
+          });
+        },
+      );
+    }
+
+    return result;
+  }
+
+  private makeVolumeItems(
+    volumes: Volume[],
+  ): Plugin.NovelItem[] {
+    return volumes.map(volume => ({
+      name: volume.name,
+      path: volume.path,
+      cover: defaultCover,
+    }));
   }
 
   async popularNovels(
@@ -206,13 +285,26 @@ class TensuraFanPlugin implements Plugin.PluginBase {
       return [];
     }
 
-    const volumes = await this.getVolumes();
+    const volumes =
+      await this.getVolumes();
 
-    return volumes.map(volume => ({
-      name: volume.name,
-      path: volume.path,
-      cover: defaultCover,
-    }));
+    /*
+     * First item = new combined version.
+     *
+     * Everything after it = the old working
+     * individual-volume entries.
+     */
+    return [
+      {
+        name: this.seriesName,
+        path: this.seriesPath,
+        cover: defaultCover,
+      },
+
+      ...this.makeVolumeItems(
+        volumes,
+      ),
+    ];
   }
 
   async searchNovels(
@@ -227,29 +319,58 @@ class TensuraFanPlugin implements Plugin.PluginBase {
       .toLowerCase()
       .trim();
 
-    const volumes = await this.getVolumes();
+    const volumes =
+      await this.getVolumes();
 
-    return volumes
-      .filter(
-        volume =>
-          !query ||
-          volume.name
-            .toLowerCase()
-            .includes(query),
-      )
-      .map(volume => ({
-        name: volume.name,
-        path: volume.path,
+    const results:
+      Plugin.NovelItem[] = [];
+
+    /*
+     * Include combined version in search.
+     */
+    if (
+      !query ||
+      this.seriesName
+        .toLowerCase()
+        .includes(query) ||
+      'tensura'.includes(query) ||
+      'slime'.includes(query)
+    ) {
+      results.push({
+        name: this.seriesName,
+        path: this.seriesPath,
         cover: defaultCover,
-      }));
+      });
+    }
+
+    /*
+     * Keep individual volume search working too.
+     */
+    results.push(
+      ...this.makeVolumeItems(
+        volumes.filter(volume =>
+          !query
+            ? true
+            : volume.name
+                .toLowerCase()
+                .includes(query),
+        ),
+      ),
+    );
+
+    return results;
   }
 
-  async parseNovel(
+  private async parseSingleVolume(
     novelPath: string,
   ): Promise<Plugin.SourceNovel> {
-    const $ = await this.loadVolume(
-      novelPath,
-    );
+    /*
+     * This is the old working 1.0.3 behavior.
+     */
+    const $ =
+      await this.loadVolume(
+        novelPath,
+      );
 
     const volumeName =
       this.cleanText(
@@ -264,28 +385,27 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     const chapterList =
       this.getChapters($);
 
-    /*
-     * LNReader itself uses paths such as:
-     *
-     * /ln/v6.html#0
-     * /ln/v6.html#1
-     *
-     * So we intentionally use that format.
-     */
-    const chapters = chapterList.map(
-      (chapter, index) => ({
-        name: chapter.name,
-        path: `${novelPath}#${index}`,
-        chapterNumber: index + 1,
-      }),
-    );
+    const chapters =
+      chapterList.map(
+        (chapter, index) => ({
+          name: chapter.name,
+
+          path:
+            `${novelPath}#${index}`,
+
+          chapterNumber:
+            index + 1,
+        }),
+      );
 
     return {
       path: novelPath,
       name: volumeName,
       author: 'Fuse',
-      genres: 'Light Novel, Fantasy',
-      status: NovelStatus.Completed,
+      genres:
+        'Light Novel, Fantasy',
+      status:
+        NovelStatus.Completed,
       summary:
         'Fan translation of That Time I Got Reincarnated as a Slime (Tensura), hosted by TensuraFan.',
       cover: defaultCover,
@@ -293,60 +413,90 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     };
   }
 
-  async parseChapter(
-    chapterPath: string,
+  private async parseCombinedSeries():
+    Promise<Plugin.SourceNovel> {
+    const seriesChapters =
+      await this.getSeriesChapters();
+
+    const chapters =
+      seriesChapters.map(
+        (item, index) => ({
+          /*
+           * LNReader itself should display:
+           *
+           * Chapter 1
+           * Chapter 2
+           * ...
+           *
+           * while this is the chapter title.
+           */
+          name:
+            `${item.volume.name} - ${item.chapter.name}`,
+
+          path:
+            `${this.seriesPath}#${index}`,
+
+          chapterNumber:
+            index + 1,
+        }),
+      );
+
+    return {
+      path: this.seriesPath,
+      name: this.seriesName,
+      author: 'Fuse',
+      genres:
+        'Light Novel, Fantasy',
+      status:
+        NovelStatus.Completed,
+      summary:
+        'Fan translation of That Time I Got Reincarnated as a Slime (Tensura), hosted by TensuraFan.',
+      cover: defaultCover,
+      chapters,
+    };
+  }
+
+  async parseNovel(
+    novelPath: string,
+  ): Promise<Plugin.SourceNovel> {
+    /*
+     * NEW combined entry.
+     */
+    if (
+      novelPath ===
+      this.seriesPath
+    ) {
+      return this.parseCombinedSeries();
+    }
+
+    /*
+     * OLD individual-volume behavior.
+     */
+    return this.parseSingleVolume(
+      novelPath,
+    );
+  }
+
+  private async parseSingleVolumeChapter(
+    volumePath: string,
+    chapterIndex: number,
   ): Promise<string> {
     /*
-     * LNReader passes:
-     *
-     * /ln/v6.html#0
-     *
-     * where 0 is Prologue,
-     * 1 is Chapter 1, etc.
+     * This is kept deliberately close to
+     * the working 1.0.3 chapter parser.
      */
-    const hashIndex =
-      chapterPath.lastIndexOf('#');
-
-    if (hashIndex === -1) {
-      throw new Error(
-        `Invalid TensuraFan chapter path: ${chapterPath}`,
+    const $ =
+      await this.loadVolume(
+        volumePath,
       );
-    }
 
-    const volumePath =
-      chapterPath.slice(0, hashIndex);
-
-    const chapterIndex = Number(
-      chapterPath.slice(hashIndex + 1),
-    );
-
-    if (
-      !Number.isInteger(chapterIndex) ||
-      chapterIndex < 0
-    ) {
-      throw new Error(
-        `Invalid chapter number: ${chapterPath}`,
-      );
-    }
-
-    const $ = await this.loadVolume(
-      volumePath,
-    );
-
-    /*
-     * Much more reliable than navigating from the
-     * #prologue/#chapter-1 image marker.
-     *
-     * Those IDs can be inside another <div>, meaning
-     * nextSibling cannot reach the chapter heading.
-     *
-     * Instead, directly select the chapter headings.
-     */
     const chapterStarts =
       $('h1.ch-number').toArray();
 
     const start =
-      chapterStarts[chapterIndex];
+      chapterStarts[
+        chapterIndex
+      ];
 
     if (!start) {
       throw new Error(
@@ -367,12 +517,10 @@ class TensuraFanPlugin implements Plugin.PluginBase {
           current.name?.toLowerCase();
 
         const id = (
-          $(current).attr('id') || ''
+          $(current).attr('id') ||
+          ''
         ).toLowerCase();
 
-        /*
-         * Beginning of the next normal chapter.
-         */
         if (
           tag === 'h1' &&
           $(current).hasClass(
@@ -382,9 +530,6 @@ class TensuraFanPlugin implements Plugin.PluginBase {
           break;
         }
 
-        /*
-         * Stop Epilogue before Manga / Afterword.
-         */
         if (
           id === 'manga' ||
           id === 'afterword' ||
@@ -397,7 +542,9 @@ class TensuraFanPlugin implements Plugin.PluginBase {
         }
       }
 
-      if (current.type === 'tag') {
+      if (
+        current.type === 'tag'
+      ) {
         const tag =
           current.name?.toLowerCase();
 
@@ -412,17 +559,15 @@ class TensuraFanPlugin implements Plugin.PluginBase {
         }
       }
 
-      current = current.nextSibling;
+      current =
+        current.nextSibling;
     }
 
-    let content = pieces
-      .join('\n')
-      .trim();
+    let content =
+      pieces
+        .join('\n')
+        .trim();
 
-    /*
-     * Last-resort cleanup for any raw template expressions
-     * that aren't contained inside a data-term element.
-     */
     content = content
       .replace(
         /\{[^{}]*(?:this\.app|allTermsChosen)[^{}]*\}/gi,
@@ -439,23 +584,132 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     return content;
   }
 
-  resolveUrl = (path: string) => {
-    if (path.startsWith('http')) {
+  private async parseCombinedChapter(
+    globalIndex: number,
+  ): Promise<string> {
+    const volumes =
+      await this.getVolumes();
+
+    let remaining =
+      globalIndex;
+
+    /*
+     * Walk through the volume chapter counts until
+     * we find which volume contains this global
+     * chapter number.
+     */
+    for (const volume of volumes) {
+      const $ =
+        await this.loadVolume(
+          volume.path,
+        );
+
+      const chapterList =
+        this.getChapters($);
+
+      if (
+        remaining <
+        chapterList.length
+      ) {
+        return this.parseSingleVolumeChapter(
+          volume.path,
+          remaining,
+        );
+      }
+
+      remaining -=
+        chapterList.length;
+    }
+
+    throw new Error(
+      `Series chapter ${globalIndex} was not found`,
+    );
+  }
+
+  async parseChapter(
+    chapterPath: string,
+  ): Promise<string> {
+    const hashIndex =
+      chapterPath.lastIndexOf('#');
+
+    if (hashIndex === -1) {
+      throw new Error(
+        `Invalid TensuraFan chapter path: ${chapterPath}`,
+      );
+    }
+
+    const basePath =
+      chapterPath.slice(
+        0,
+        hashIndex,
+      );
+
+    const chapterIndex = Number(
+      chapterPath.slice(
+        hashIndex + 1,
+      ),
+    );
+
+    if (
+      !Number.isInteger(
+        chapterIndex,
+      ) ||
+      chapterIndex < 0
+    ) {
+      throw new Error(
+        `Invalid chapter number: ${chapterPath}`,
+      );
+    }
+
+    /*
+     * Combined series.
+     */
+    if (
+      basePath ===
+      this.seriesPath
+    ) {
+      return this.parseCombinedChapter(
+        chapterIndex,
+      );
+    }
+
+    /*
+     * Existing individual volume.
+     */
+    return this.parseSingleVolumeChapter(
+      basePath,
+      chapterIndex,
+    );
+  }
+
+  resolveUrl = (
+    path: string,
+  ) => {
+    if (
+      path.startsWith('http')
+    ) {
       return path;
     }
 
-    if (path.startsWith('//')) {
+    if (
+      path.startsWith('//')
+    ) {
       return 'https:' + path;
     }
 
-    if (path.startsWith('/')) {
+    if (
+      path.startsWith('/')
+    ) {
       return this.site + path;
     }
 
-    return `${this.site}/${path.replace(
-      /^\.\//,
-      '',
-    )}`;
+    return (
+      `${this.site}/` +
+      path.replace(
+        /^\.\//,
+        '',
+      )
+    );
   };
 }
 
