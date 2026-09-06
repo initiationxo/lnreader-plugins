@@ -15,8 +15,10 @@ class TensuraFanPlugin implements Plugin.PluginBase {
   name = 'TensuraFan Slime Reader';
   icon = 'https://tensurafan.github.io/icons/android-icon-192x192.png';
   site = 'https://tensurafan.github.io';
-  version = '1.0.1';
+  version = '1.0.2';
   filters = {};
+
+  private chapterSeparator = '/__chapter__/';
 
   private async getVolumes(): Promise<Volume[]> {
     const result = await fetchApi(`${this.site}/ln/volumes.json`);
@@ -40,32 +42,76 @@ class TensuraFanPlugin implements Plugin.PluginBase {
 
   private cleanText(text: string): string {
     return text
-      .replace(/\s+/g, ' ')
       .replace(/\{\{.*?\}\}/g, '')
+      .replace(/\{[^{}]*this\.[^{}]*\}/g, '')
+      .replace(/\{[^{}]*\}/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([,.:;!?])/g, '$1')
       .trim();
+  }
+
+  private fallbackChapterName(anchor: string): string {
+    if (anchor === 'prologue') return 'Prologue';
+    if (anchor === 'interlude') return 'Interlude';
+    if (anchor === 'epilogue') return 'Epilogue';
+
+    const chapterMatch = anchor.match(/^chapter-(\d+)$/);
+
+    if (chapterMatch) {
+      return `Chapter ${chapterMatch[1]}`;
+    }
+
+    return anchor
+      .split('-')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
   }
 
   private getChapterLinks($: CheerioAPI): Array<{
     name: string;
     anchor: string;
   }> {
-    const chapters: Array<{ name: string; anchor: string }> = [];
+    const chapters: Array<{
+      name: string;
+      anchor: string;
+    }> = [];
+
+    const seen = new Set<string>();
 
     $('a.hlink[href*="#"]').each((_, element) => {
       const href = $(element).attr('href') || '';
 
-      const hash = href.indexOf('#');
-      if (hash === -1) return;
+      const hashIndex = href.indexOf('#');
 
-      const anchor = href.slice(hash + 1);
+      if (hashIndex === -1) return;
 
-      if (!anchor || anchor === 'manga' || anchor === 'afterword') {
+      const anchor = href
+        .slice(hashIndex + 1)
+        .trim()
+        .toLowerCase();
+
+      if (!anchor) return;
+
+      if (anchor === 'manga' || anchor === 'afterword') {
         return;
       }
 
-      const name = this.cleanText($(element).text());
+      if (seen.has(anchor)) {
+        return;
+      }
 
-      if (!name) return;
+      seen.add(anchor);
+
+      let name = this.cleanText($(element).text());
+
+      if (
+        !name ||
+        name.includes('{') ||
+        name.includes('}') ||
+        name.includes('this.')
+      ) {
+        name = this.fallbackChapterName(anchor);
+      }
 
       chapters.push({
         name,
@@ -111,7 +157,7 @@ class TensuraFanPlugin implements Plugin.PluginBase {
 
     return volumes
       .filter(volume =>
-        volume.name.toLowerCase().includes(query)
+        volume.name.toLowerCase().includes(query),
       )
       .map(volume => ({
         name: volume.name,
@@ -137,7 +183,10 @@ class TensuraFanPlugin implements Plugin.PluginBase {
 
     const chapters = chapterLinks.map((chapter, index) => ({
       name: chapter.name,
-      path: `${novelPath}?chapter=${encodeURIComponent(chapter.anchor)}`,
+      path:
+        novelPath +
+        this.chapterSeparator +
+        encodeURIComponent(chapter.anchor),
       chapterNumber: index + 1,
     }));
 
@@ -157,20 +206,23 @@ class TensuraFanPlugin implements Plugin.PluginBase {
   async parseChapter(
     chapterPath: string,
   ): Promise<string> {
-    const questionMark = chapterPath.indexOf('?');
+    const separatorIndex = chapterPath.indexOf(
+      this.chapterSeparator,
+    );
 
-    const volumePath =
-      questionMark >= 0
-        ? chapterPath.slice(0, questionMark)
-        : chapterPath;
+    if (separatorIndex === -1) {
+      throw new Error(
+        `Invalid TensuraFan chapter path: ${chapterPath}`,
+      );
+    }
 
-    const query =
-      questionMark >= 0
-        ? chapterPath.slice(questionMark + 1)
-        : '';
+    const volumePath = chapterPath.slice(0, separatorIndex);
 
-    const params = new URLSearchParams(query);
-    const anchor = params.get('chapter');
+    const anchor = decodeURIComponent(
+      chapterPath.slice(
+        separatorIndex + this.chapterSeparator.length,
+      ),
+    );
 
     if (!anchor) {
       throw new Error('Chapter identifier missing');
@@ -178,31 +230,37 @@ class TensuraFanPlugin implements Plugin.PluginBase {
 
     const $ = await this.loadVolume(volumePath);
 
-    const marker = $(`#${anchor}`).first();
+    const marker = $(`[id="${anchor}"]`).first();
 
     if (!marker.length) {
-      throw new Error(`Chapter marker not found: ${anchor}`);
+      throw new Error(
+        `Chapter marker not found: ${anchor}`,
+      );
     }
 
+    let current: any = marker.get(0);
     let start: any = null;
 
-    let current: any = marker.get(0);
-
     while (current) {
-      if (
-        current.type === 'tag' &&
-        current.name?.toLowerCase() === 'h1' &&
-        $(current).hasClass('ch-number')
-      ) {
-        start = current;
-        break;
+      if (current.type === 'tag') {
+        const tag = current.name?.toLowerCase();
+
+        if (
+          tag === 'h1' &&
+          $(current).hasClass('ch-number')
+        ) {
+          start = current;
+          break;
+        }
       }
 
       current = current.nextSibling;
     }
 
     if (!start) {
-      throw new Error(`Chapter heading not found: ${anchor}`);
+      throw new Error(
+        `Chapter heading not found: ${anchor}`,
+      );
     }
 
     const pieces: string[] = [];
@@ -212,10 +270,15 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     while (current) {
       if (current !== start && current.type === 'tag') {
         const tag = current.name?.toLowerCase();
+        const id = ($(current).attr('id') || '').toLowerCase();
 
         if (
-          tag === 'h1' &&
-          $(current).hasClass('ch-number')
+          (tag === 'h1' &&
+            $(current).hasClass('ch-number')) ||
+          id === 'manga' ||
+          id === 'afterword' ||
+          (tag === 'h1' &&
+            $(current).hasClass('afterword'))
         ) {
           break;
         }
@@ -225,15 +288,12 @@ class TensuraFanPlugin implements Plugin.PluginBase {
         const tag = current.name?.toLowerCase();
 
         if (
-          tag === 'script' ||
-          tag === 'style' ||
-          tag === 'nav'
+          tag !== 'script' &&
+          tag !== 'style' &&
+          tag !== 'nav'
         ) {
-          current = current.nextSibling;
-          continue;
+          pieces.push($.html(current));
         }
-
-        pieces.push($.html(current));
       }
 
       current = current.nextSibling;
@@ -242,7 +302,9 @@ class TensuraFanPlugin implements Plugin.PluginBase {
     const content = pieces.join('\n').trim();
 
     if (!content) {
-      throw new Error(`No content found for chapter: ${anchor}`);
+      throw new Error(
+        `No readable content found for chapter: ${anchor}`,
+      );
     }
 
     return content;
@@ -251,6 +313,10 @@ class TensuraFanPlugin implements Plugin.PluginBase {
   resolveUrl = (path: string) => {
     if (path.startsWith('http')) {
       return path;
+    }
+
+    if (path.startsWith('//')) {
+      return 'https:' + path;
     }
 
     return this.site + path;
